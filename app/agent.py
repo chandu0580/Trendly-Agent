@@ -58,6 +58,7 @@ class SupportAgent:
         if self.mode in {"auto", "llm"} and self.api_key:
             try:
                 reply = self._llm(session, message, runtime)
+                reply = self._enforce_critical_reply(reply, runtime)
                 return self._save(session, message, reply, runtime, "llm")
             except Exception:
                 if self.mode == "llm":
@@ -72,6 +73,26 @@ class SupportAgent:
         escalations = [a for a in runtime.actions if a["type"] == "escalated"]
         handoff = escalations[-1]["details"].get("summary") if escalations else None
         return reply, runtime.actions, handoff, mode
+
+    @staticmethod
+    def _enforce_critical_reply(reply: str, runtime: ToolRuntime) -> str:
+        """Preserve mandatory policy language for safety-critical escalations.
+
+        The LLM chooses tools and writes normal replies. Once a deterministic
+        escalation action exists, this final response guard prevents a vague
+        handoff from hiding a policy-required outcome.
+        """
+        for action in runtime.actions:
+            details = action.get("details", {})
+            evidence = f"{details.get('reason', '')} {details.get('summary', '')}".lower()
+            if action["type"] == "escalated" and "lost" in evidence:
+                reference = action["reference"]
+                return (
+                    "I’m sorry—your carrier has marked this parcel as lost. This is a lost-parcel claim, not a return, "
+                    f"so I’ve escalated it to our support team ({reference}). They will resolve it within 5 business days "
+                    "with your choice of a free replacement or a full refund."
+                )
+        return reply
 
     def _llm(self, session: Session, message: str, runtime: ToolRuntime) -> str:
         client = OpenAI(api_key=self.api_key, base_url=self.base_url)

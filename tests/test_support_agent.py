@@ -1,4 +1,6 @@
 from app.agent import SupportAgent
+from app.policy import today
+from app.tools import ToolRuntime
 
 
 AS_OF = "2026-08-24"
@@ -24,6 +26,16 @@ def test_lost_parcel_is_escalated_not_returned():
     assert "lost" in reply.lower()
     assert actions[0]["type"] == "escalated"
     assert "Lost-parcel claim" in handoff
+
+
+def test_lost_parcel_llm_response_guard_keeps_required_policy_context():
+    agent = SupportAgent()
+    runtime = ToolRuntime(agent.store, "C-101", today(AS_OF))
+    runtime.call("escalate_to_human", {"reason": "carrier_exception", "summary": "Carrier marked the parcel lost."})
+    reply = agent._enforce_critical_reply("Generic escalation text", runtime)
+    assert "marked this parcel as lost" in reply
+    assert "not a return" in reply
+    assert "5 business days" in reply
 
 
 def test_non_returnable_jewellery_refused_inside_window():
