@@ -76,8 +76,12 @@ class SupportAgent:
     def _llm(self, session: Session, message: str, runtime: ToolRuntime) -> str:
         client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}, *session.history, {"role": "user", "content": message}]
-        for _ in range(6):
-            response = client.chat.completions.create(model=self.model, messages=messages, tools=TOOL_SCHEMAS, tool_choice="auto", temperature=0.1)
+        for step in range(6):
+            # GLM can occasionally answer an order request in prose instead of
+            # selecting a tool. Requiring one initial tool turn anchors every
+            # customer request in server-side facts; later turns may conclude.
+            tool_choice = "required" if step == 0 else "auto"
+            response = client.chat.completions.create(model=self.model, messages=messages, tools=TOOL_SCHEMAS, tool_choice=tool_choice, temperature=0.1)
             assistant_message = response.choices[0].message
             dumped = assistant_message.model_dump(exclude_none=True)
             messages.append(dumped)
