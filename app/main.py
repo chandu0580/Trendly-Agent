@@ -4,9 +4,15 @@ from fastapi import FastAPI, HTTPException
 
 from .agent import SupportAgent
 from .models import Action, ChatRequest, ChatResponse
+from .web import chat_page
 
 app = FastAPI(title="Trendly Agentic Support Assistant", version="1.0.0")
 agent = SupportAgent()
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return chat_page()
 
 
 @app.get("/health")

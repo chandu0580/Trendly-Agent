@@ -13,7 +13,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-The base URL is `http://127.0.0.1:8000`; interactive API docs are at `/docs`.
+The browser chat UI is at `http://127.0.0.1:8000`; interactive API docs are at `/docs`.
 
 To use an actual free-tier tool-calling model, copy `.env.example` to `.env`, set `LLM_API_KEY` to a Google AI Studio key, then load those environment variables in your shell. The default base URL/model targets Gemini’s OpenAI-compatible API. No paid LLM is required. Without a key, `AGENT_MODE=auto` selects the offline deterministic mode. Use `AGENT_MODE=llm` to fail closed rather than falling back if the LLM is unavailable.
 
