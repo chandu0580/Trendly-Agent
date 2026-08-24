@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+pytest-cache-files-*/
+Intern Assessment/
+.venv/
+.env
+*.pyc
