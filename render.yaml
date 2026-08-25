@@ -5,7 +5,7 @@
 # endpoint is ever committed to the repo.
 services:
   - type: web
-    name: trendly-support-agent
+    name: trendly-agent
     runtime: python
     plan: free
     region: singapore
