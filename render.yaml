@@ -1,0 +1,39 @@
+# Render blueprint — free tier, no card required.
+# Deploy: push this repo to GitHub, then https://dashboard.render.com/blueprints
+# → New Blueprint Instance → pick the repo. Set LLM_API_KEY, LLM_BASE_URL and
+# LLM_MODEL in the dashboard — they are sync:false so no key or private
+# endpoint is ever committed to the repo.
+services:
+  - type: web
+    name: trendly-support-agent
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt && python -m app.retrieval.ingest
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.3"
+      # All three are set in the dashboard and must agree with each other: the
+      # key, the endpoint it belongs to, and a model that endpoint serves. A key
+      # for one provider against another's URL fails every call and the service
+      # quietly degrades to the deterministic fallback, which still answers — so
+      # the symptom is "replies got worse", not an outage. Check /health after
+      # deploying: it reports the model actually configured.
+      #
+      #   Google AI Studio  https://generativelanguage.googleapis.com/v1beta/openai/  gemini-2.5-flash
+      #   OpenAI-compatible gateway   <your gateway>/v1/                              <model it serves>
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_BASE_URL
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+      # auto: degrade to the grounded fallback router if the provider blips,
+      # rather than failing closed in front of a reviewer.
+      - key: AGENT_MODE
+        value: auto
+      # The supplied fixture is a frozen snapshot; see README "A note on dates".
+      - key: DEMO_AS_OF
+        value: "2026-07-29"

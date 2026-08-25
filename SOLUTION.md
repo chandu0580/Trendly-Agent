@@ -2,45 +2,178 @@
 
 ## Architecture
 
-The service is a small FastAPI application with one conversational endpoint. The caller supplies a channel session ID and the authenticated customer ID; in production the latter would come from a signed session/JWT rather than the request body. The service stores concise recent conversation state plus any pending confirmed action, keyed by session ID.
+A FastAPI service with one conversational endpoint, orchestrated by a single LangGraph agent.
 
-The orchestration layer has two modes. In normal LLM mode it executes a bounded ReAct loop using the OpenAI-compatible tool-calling interface (tested with Gemini’s free tier configuration). The LLM sees a system prompt, the last six conversational turns, and function schemas. It can request tools, receives structured JSON results, and then composes the customer reply. The tool loop is capped at six rounds, which prevents runaway retries. `AGENT_MODE=llm` fails closed on provider failure; `auto` gives reviewers an offline deterministic mode that exercises the same domain tools and guardrails at no cost.
+```
+START -> agent -> tools -> agent -> guard -> END
+```
 
-Tools are deliberately narrow:
+`agent` reasons and selects tools. `tools` executes them under the authorization layer. `guard`
+inspects the drafted reply and either sends it back for another grounded round or lets it through —
+it can never rewrite an answer. The first round of every turn is a forced tool call, so no
+customer-facing claim is ever made from memory alone.
 
-| Need | Tool and control |
-| --- | --- |
-| Order status | `lookup_order` enforces the authenticated customer boundary server-side. |
-| Policy question | `get_policy` returns only an excerpt of the supplied policy markdown. |
-| Return/exchange decision | Deterministic rule tools combine delivered date, item attributes, and policy rules. |
-| Mutation | Creation tools require a prior successful eligibility check and the conversation requires explicit confirmation. |
-| Exceptions | `escalate_to_human` creates an auditable case reference and concise factual handoff. |
+Underneath sit layers the model cannot reach past:
+
+| Concern | Component | Control |
+| --- | --- | --- |
+| Identity | `resolve_trusted_customer`, in the API layer | Validated and bound to the session **before the agent runs**; unknown → 403, conflict → 409. |
+| Order facts | `get_order`, `list_my_orders` | Identity is runtime context; **no tool accepts a `customer_id`**. "Not found" and "not yours" return the same result with no order fields. |
+| Policy | `search_policy` over a Chroma index | 28 clause-level chunks carrying section numbers; hybrid semantic + lexical; answers cite sections. |
+| Decisions | `check_*_eligibility` | Pure functions over the order record. The model never computes a verdict. |
+| Order-specific policy | `get_refund_timing`, `quote_shipping_fee` | Joins the order's own payment method or total to a clause. A COD refund escalates *inside* the tool under 3.3. |
+| Mutations | `initiate_*`, `issue_delay_credit` | Require a passing check, a proposal from an earlier turn, and a matching affirmative now. |
+| Exceptions | `escalate_to_human` | Case reference plus a handoff a person can act on. |
+
+**Retrieval supplies evidence; deterministic services make decisions.** That split is the core of
+the design — RAG is never in the transactional path.
+
+**State and memory.** Three things persist per session: recent messages, the active order, and at
+most one outstanding proposal. Every fact is re-fetched per turn rather than remembered, so the
+agent cannot drift from the order record as a conversation lengthens. There is deliberately **no
+long-term customer memory**: what outlives a conversation already has a home — policy in the index,
+orders in the repository — and persisting more would add a retention policy, a deletion path, and a
+privacy surface to serve no requirement, while introducing the exact failure this design avoids, an
+agent acting on a remembered fact rather than a checked one.
+
+**Actions and idempotency.** A state change needs a proposal plus an affirmative matching customer,
+kind, order, and item; read-only work never asks. An action's identity is
+`(customer, kind, order, item)`, so a repeat returns the first reference instead of creating a
+second — checked before the grant and confirmation gates, since a replay already passed them, and
+lock-guarded so two concurrent requests cannot both create. Escalations are deliberately *not*
+idempotent: two genuine handoffs are two tickets.
+
+**Time.** One injectable clock feeds every dated rule, so no verdict depends on when the suite runs.
+Policy windows are IST calendar dates while the dataset stores UTC — `2026-07-26T20:00:00Z` is the
+27th to the customer — converted once rather than at each call site. A date-only request is read as
+start-of-day so a window never expires early against the customer.
+
+**Bounded work and recovery.** A hard step cap is checked before any further tool work; retries and
+guard nudges are separately bounded, and LangGraph's recursion limit is derived from the cap so the
+two cannot drift. Recovery is layered: transient 429/5xx retry with backoff while a malformed
+request does not; a gateway rejecting forced tool choice degrades to `auto`; a refused tool returns
+an instruction the model acts on in the same loop; the step ceiling escalates; a turn abandoned
+mid-flight discards provisional escalations so the fallback cannot raise a duplicate, while a
+mutation already written is still reported. Only when all of that is exhausted does a deterministic
+fallback answer — it calls the same tools, so it is worse at language and identical in safety.
+
+**Observability.** Every turn carries a trace id through the context, the logs, and the response,
+alongside step count, tool count, per-component latency, and verification state. One run is
+reconstructable from the logs. A handful of fields, deliberately, not a platform.
+
+## The security boundary
+
+One assistant serves every customer, so *"my order"* identifies nothing, and the policy forbids
+discussing another customer's order. That makes verification a correctness requirement, and the line
+is drawn so the model has no say in it:
+
+> **The model decides** what the customer wants and which tool to reach for, and extracts
+> identifiers from whatever phrasing they used. **The application decides** whether those
+> identifiers are valid, whether the order belongs to that customer, and whether an action may run.
+
+Identity arrives two ways. A channel-supplied `customer_id` is validated and bound before the agent
+runs. Without one the session starts *unverified* — deliberately, with no default identity — and the
+agent asks for a customer ID and order ID, then submits them through `verify_identity`. Either way
+the outcome becomes runtime context no tool parameter can override.
+
+Verification is **per-order, not per-session**: being verified for TR-4524 does not unlock TR-4522,
+and ownership is re-checked at execution time, not merely when eligibility was granted. Denials are
+uniform — "no such order" and "not your order" return the same result — because distinguishing them
+would itself disclose that the order exists. Eligibility denies before any business rule runs, so a
+non-owner cannot infer an item's window, category, or price.
+
+**This is not authentication.** Anyone reaching the endpoint can claim to be any of the four
+customers. What the design guarantees is that having claimed one, they are confined to it, the model
+cannot move them, and every order is checked individually. In production identity would come from an
+authenticated session; `resolve_trusted_customer` is the only function that would change.
 
 ## Key trade-offs
 
-I chose deterministic eligibility logic rather than asking an LLM to calculate dates or interpret exclusions. It makes final-sale, non-returnable category, cancelled order, damaged-item, and 30-day decisions reliable and auditable. The model retains value where language understanding and multi-turn tool selection matter; it cannot authorise an exception.
+**One agent with many tools, not many agents.** Every request is one customer, one order, one policy
+question. A planner/critic split adds hops and failure modes without changing a single answer. The
+complexity that *is* justified went into the authorization layer instead.
 
-An in-memory session/action store keeps the take-home compact. It should be replaced with Redis plus a durable case/returns service in a real deployment. Likewise, requested-size availability is not present in the supplied fixture, so the exchange tool explicitly marks it as pending confirmation rather than fabricating inventory.
+**Function calling, not MCP.** MCP earns its keep when tools belong to other teams or processes.
+These are internal functions over local data; a protocol boundary would add operational surface with
+no integration benefit.
 
-The supplied fixed records use dates around the assessment. An optional `as_of` clock makes tests stable. Production omits it and uses the service date.
+**Eligibility in code, not in the model.** The cost is that a genuinely novel policy situation
+cannot be reasoned about at all — it escalates. For an agent that decides refunds, I take that trade
+every time.
 
-## Guardrails and recovery
+**Hybrid retrieval, not a reranker.** Policy questions turn on exact terms ("final sale", "cash on
+delivery", "48 hours") and clause numbers, where a nearest-neighbour miss produces a fluent answer
+grounded in the wrong rule. Lexical matching anchors those; semantic covers the paraphrases.
+Section-aware chunking does more for accuracy here than a learned reranker would. Chroma with local
+ONNX embeddings runs on CPU with no API key and no torch.
 
-- No customer can see another customer’s order: every lookup is customer-scoped, and a session cannot switch identity.
-- Policy answers are grounded only in `trendly_policy.md`; unknown questions produce a human handoff.
-- Bank/card/CVV-like content is refused before the LLM sees it. COD refund details are directed to a human secure-link process.
-- Discount/coupon/waiver requests are refused and escalated, except the existing delayed-order status response which states only the policy-defined ₹250 credit.
-- Lost parcels always become a human lost-parcel claim, never a return.
-- Tool, provider, and loop failure do not produce invented answers or partial mutations.
+**Similarity is not coverage.** "Does Trendly ship to Antarctica?" scores highly against the
+shipping section *because* it is about shipping, and no threshold fixes that — the passage is
+genuinely the nearest text, it simply does not answer the question. So retrieval also reports which
+content words appear nowhere in the policy; when it finds any, the result is marked not-covered and
+carries instructions to say so and escalate. Derived from the indexed vocabulary, so it generalises
+to questions nobody anticipated. Biased toward caution: a covered question can be flagged, costing
+an unnecessary handoff, whereas the opposite error invents a shipping policy for a continent Trendly
+does not serve.
+
+**Out of scope is not an escalation.** A question the policy omits ("do you offer gift wrapping?")
+needs a human. One nobody at Trendly should answer ("what is Python?") needs a polite decline and no
+ticket. Conflating them floods a real support queue.
+
+**An anchored clock for a frozen fixture.** `orders.json` is a snapshot whose scenarios are defined
+relative to an implied "today". On 2026-07-29 every annotation holds at once; against a moving clock
+three distinct refusal paths collapse into "outside the return window" within weeks and the dataset
+stops testing what it was built to test. Overridable per request, disabled by clearing `DEMO_AS_OF`.
 
 ## Known limitations
 
-This is not a production identity system; `customer_id` is an upstream-authentication boundary assumed by the API. Creation references are simulated, inventory availability is intentionally unavailable, and the offline interpreter is a review/test fallback rather than a substitute for an LLM. It uses in-memory state, has no rate limiting or observability backend, and does not yet ingest live carrier-webhook events or support attachments for damaged-item photos.
+- **`customer_id` is not authentication** — a trusted demo identity asserted by the caller. Real auth
+  belongs in front of this.
+- **All state is in-process.** Sessions, identity bindings, and the action ledger do not survive a
+  restart, so idempotency does not span a deploy and a session id can be re-bound. Redis with a TTL
+  is the fix.
+- **Actions are simulated.** Nothing reaches a real returns, refund, or carrier system.
+- **Inventory is absent from the dataset**, so an exchange is created with availability explicitly
+  unconfirmed; policy 4.3's conversion to a refund is explained but not executed.
+- **Half the lost-parcel rule is unimplemented** — "no tracking movement for 10 consecutive days"
+  needs an event history the fixture does not have.
+- **Business days are approximated as calendar days**, because the policy references public holidays
+  but supplies no calendar. Affects dispatch timing, delivery estimates, and the delay threshold.
+- **Coverage detection is word-level and over-fires.** An inflection can trip it — "delivery to a
+  metro *city*" flags `city` because the document says "cities" — so a covered question can be
+  handed to a human it did not need.
+- **The deterministic helpers assume this dataset's id format.** Business logic is fully
+  data-driven — swapping in a different retailer's orders with `CUST-88213` / `ORD-2026-0001` ids
+  works untouched, ownership and eligibility included. But `ORDER_ID_RE` matches `TR-0000`
+  literally, so on a different format the *offline* fallback cannot carry an order across turns and
+  a bare id with no topic word would not force a grounding call. The model-driven path is
+  unaffected, since the model extracts identifiers itself. One regex, and the format belongs in
+  config rather than in code.
+- **Contact details are a demo fixture.** `data/customer_profiles.json` is invented; the supplied
+  dataset has no name, email, or phone. In production this comes from the CRM, and the order source
+  is a path constant rather than a configurable connection.
+- **The reply guards key off text patterns.** They can only force a tool call or defer to the
+  fallback, never decide an answer, but an unusually phrased request could slip past them. Scope
+  discipline is likewise a prompt-level rule, not a hard guarantee like authorization.
+- **Prompt-injection hardening is partial.** Content gates catch card and bank patterns before the
+  provider and the tool layer bounds the blast radius, but an injection inside an order field would
+  reach the model.
+- **No rate limiting or observability backend.** Structured logs, `tool_trace`, and
+  `policy_sections` are the beginnings of the latter.
 
 ## Five discovery questions for Trendly operations
 
-1. Which identity signals are available in every channel, and what re-authentication is required before exposing order data or initiating a return?
-2. What is the canonical order/returns system of record, and which APIs are idempotent enough for pickup, replacement, refund, and exchange mutations?
-3. How do carrier feeds encode “no movement for 10 consecutive days,” partial shipment events, and delivery confirmation, including business-day calendars?
-4. What inventory/reservation API can verify a requested exchange size before the customer is promised one, and can an exchange be held while the return is in transit?
-5. What are the escalation SLAs, queues, support hours, required handoff fields, and authority boundaries for damaged items, address changes, delay credits, and exception approvals?
+1. **What is the system of record for order, shipment, refund, and return state, and which of its
+   mutations are idempotent?** Pickup scheduling, replacements, refunds, and exchanges all need
+   retry-safe semantics before this can create anything real.
+2. **Which identity signals exist on every channel, and what re-authentication do you require before
+   exposing order data or initiating a return?** The answer decides whether an asserted id stays a
+   header or becomes a step-up flow.
+3. **Which actions may the agent complete alone, and which need human approval?** I have drawn that
+   line at "policy-defined and reversible" — the ₹250 delay credit is automated, everything else
+   escalates — but that is an operations decision, not an engineering one.
+4. **How are business calendars, public holidays, serviceable pincodes, and city tiers maintained,
+   and what API exposes them?** Three shipping rules and the delay threshold are approximations
+   today because none of that is in the data.
+5. **What are the SLA, escalation queue, audit, and observability requirements?** I would rather
+   match the handoff payload to what an agent's console actually needs than guess at it.

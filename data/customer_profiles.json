@@ -1,0 +1,25 @@
+{
+  "_note": "Demo fixture, not part of the supplied assignment dataset. orders.json carries only customer_id and shipping_city, so the contact details below are invented to give the support desk a realistic profile panel. Cities match orders.json. Never treat this as real personal data.",
+  "profiles": {
+    "C-100": {
+      "name": "Ananya Rao",
+      "email": "ananya.rao@example.com",
+      "mobile": "+91 98450 21134"
+    },
+    "C-101": {
+      "name": "Rohan Mehta",
+      "email": "rohan.mehta@example.com",
+      "mobile": "+91 98200 47762"
+    },
+    "C-102": {
+      "name": "Divya Krishnan",
+      "email": "divya.krishnan@example.com",
+      "mobile": "+91 98400 33915"
+    },
+    "C-103": {
+      "name": "Imran Qureshi",
+      "email": "imran.qureshi@example.com",
+      "mobile": "+91 98490 60428"
+    }
+  }
+}

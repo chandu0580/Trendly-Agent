@@ -1,7 +1,15 @@
 __pycache__/
+*.pyc
 .pytest_cache/
 pytest-cache-files-*/
-Intern Assessment/
 .venv/
 .env
-*.pyc
+.env.*
+!.env.example
+Intern Assessment/
+
+# Build artifact: rebuild with `python -m app.retrieval.ingest`
+vectorstore/
+
+# Local run artifacts
+*.log
