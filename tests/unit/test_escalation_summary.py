@@ -153,3 +153,36 @@ def test_the_summary_only_holds_what_the_turn_supplied():
     assert structured.get("order_id") is None
     assert structured["facts_checked"] == []
     assert structured.get("action_attempted") is None
+
+
+def test_a_lost_parcel_handoff_relays_the_clause_not_an_invented_outcome():
+    """The agent cited 1.6 without ever reading it, then improvised the outcome.
+
+    A live run promised "a colleague will process your refund to your credit
+    card". Policy 1.6 makes that the customer's choice between a replacement and
+    a refund, within a stated window — so the reply committed a colleague to one
+    outcome and dropped what the customer was actually entitled to.
+    """
+    from datetime import date
+
+    from app.tools import build_toolset
+    from app.tools.context import ToolContext
+
+    ctx = ToolContext.build("C-101", date(2026, 7, 29))
+    escalate = next(t for t in build_toolset(ctx) if t.name == "escalate_to_human")
+    result = escalate.invoke(
+        {"reason": "lost_parcel", "summary": "Parcel never arrived.", "order_id": "TR-4526"}
+    )
+
+    guidance = result["guidance"]
+    assert "replacement" in guidance and "refund" in guidance, "clause text was not handed over"
+    assert "5 business days" in guidance, "the stated timeline was not handed over"
+    assert "do not" in guidance.lower() and "outcome" in guidance.lower()
+
+
+def test_the_clause_is_read_from_the_document_not_restated():
+    """It must track the policy file, so an edited clause is relayed correctly."""
+    from app.tools.escalation import _clause_text
+
+    assert "lost-parcel claim" in _clause_text("1.6").lower()
+    assert _clause_text("9.9") == ""

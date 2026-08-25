@@ -84,6 +84,23 @@ class DelayCreditArgs(BaseModel):
     order_id: str = Field(description="Trendly order id for the delayed order.")
 
 
+def _clause_text(section: str) -> str:
+    """The indexed text of one policy clause, or "" if it cannot be read.
+
+    Reads the document rather than restating it: the policy must not be baked
+    into a prompt, and this stays correct if the clause is edited.
+    """
+    try:
+        from ..retrieval.ingest import load_chunks
+
+        for chunk in load_chunks():
+            if chunk.section_number == section:
+                return " ".join(chunk.text.split())
+    except Exception:
+        pass
+    return ""
+
+
 def build_escalate_to_human(ctx: ToolContext) -> StructuredTool:
     def escalate_to_human(
         reason: str,
@@ -102,9 +119,17 @@ def build_escalate_to_human(ctx: ToolContext) -> StructuredTool:
         # occasionally filing a junk case, so the model keeps the final say.
         bucket = normalise_reason(reason)
         text = summary.strip()
+        relayed_clause = ""
         if "lost" in reason.lower() or "lost" in text.lower():
             text = f"Lost-parcel claim: {text}"
             ctx.cite(["1.6"])
+            # Citing a clause the model never read is how it ends up improvising
+            # the outcome. A live run promised "a colleague will process your
+            # refund" — but 1.6 makes the choice between replacement and refund
+            # the customer's, within a stated window. Hand over the clause text
+            # so the reply relays what the policy actually grants rather than
+            # committing a colleague to one outcome.
+            relayed_clause = _clause_text("1.6")
         if "second_exchange" in reason.lower():
             ctx.cite(["4.4"])
         if order_id:
@@ -147,7 +172,10 @@ def build_escalate_to_human(ctx: ToolContext) -> StructuredTool:
             # previous wording ("give the reference and say what happens next")
             # reliably produced replies that opened with "I've handed this over".
             guidance=(
-                "Write the reply in this order: first acknowledge what the customer is dealing "
+                (f"The governing clause reads: {relayed_clause} Relay what it entitles the customer "
+                 "to — including any choice it gives them and any stated timeline — and do not "
+                 "promise one particular outcome on the colleague's behalf. " if relayed_clause else "")
+                + "Write the reply in this order: first acknowledge what the customer is dealing "
                 "with in your own words, then give them this case reference, then say what happens "
                 "next. Do not open with 'I've handed this over' — that leads with your process "
                 "instead of their problem. Apologise once and plainly: never write 'sorry again' "
