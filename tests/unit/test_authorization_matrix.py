@@ -200,3 +200,50 @@ def test_a_stolen_proposal_does_not_survive_a_customer_switch():
 
     assert result["created"] is False
     assert not ctx.actions
+
+
+# ------------------------------------------------ identifiers are case-blind
+
+
+@pytest.mark.parametrize(
+    "customer_id,order_id",
+    [("c-100", "tr-4524"), ("C-100", "tr-4524"), ("c-100", "TR-4524"),
+     (" c-100 ", " tr-4524 ")],
+)
+def test_an_owner_is_recognised_however_they_type_their_ids(customer_id, order_id):
+    """Order ids were uppercased on the way in; customer ids were not.
+
+    So `C-100` was recognised and `c-100` was not — the same person accepted or
+    rejected on their shift key. Case and surrounding space are not part of an
+    identity.
+    """
+    from app.services.order_repository import get_order_repository
+
+    assert get_order_repository().customer_exists(customer_id)
+    assert get_order_repository().get_for_customer(order_id, customer_id) is not None
+
+
+@pytest.mark.parametrize(
+    "customer_id,order_id",
+    [("c-100", "tr-4522"), ("C-100", "tr-4522"), ("c-101", "TR-4524")],
+)
+def test_normalising_case_does_not_open_someone_elses_order(customer_id, order_id):
+    """The boundary must hold in every casing, not just the canonical one."""
+    from app.services.order_repository import get_order_repository
+
+    assert get_order_repository().get_for_customer(order_id, customer_id) is None
+
+
+def test_listing_a_customers_orders_is_case_blind_too():
+    from app.services.order_repository import get_order_repository
+
+    repo = get_order_repository()
+    assert len(repo.orders_for_customer("c-101")) == len(repo.orders_for_customer("C-101")) == 3
+
+
+def test_an_unknown_customer_is_still_unknown_in_any_casing():
+    from app.services.order_repository import get_order_repository
+
+    repo = get_order_repository()
+    assert not repo.customer_exists("c-999")
+    assert not repo.customer_exists("C-999")
