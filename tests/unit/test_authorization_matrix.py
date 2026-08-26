@@ -42,7 +42,7 @@ def sensitive_values(order_id: str) -> list[str]:
     """Every field of the real order that a non-owner must never see."""
     owner = next(c for c, orders in OWNERSHIP.items() for o in orders if o == order_id)
     order = get_order_repository().get_for_customer(order_id, owner)
-    customer = get_order_repository()._customers[owner]
+    customer = get_order_repository().get_customer(owner)
 
     values = [
         customer.name,
@@ -247,3 +247,57 @@ def test_an_unknown_customer_is_still_unknown_in_any_casing():
     repo = get_order_repository()
     assert not repo.customer_exists("c-999")
     assert not repo.customer_exists("C-999")
+
+
+@pytest.mark.parametrize(
+    "typed",
+    ["C-100", "c-100", " C-100 ", "C 100", "C100", "c100", "#C-100", "C-100.", "C–100"],
+)
+def test_a_customer_id_resolves_however_it_is_punctuated(typed):
+    """People do not type identifiers the way a database stores them.
+
+    A full stop at the end of a sentence, a missing hyphen, or the en dash
+    autocorrect substitutes are all the same customer.
+    """
+    from app.services.order_repository import get_order_repository
+
+    assert get_order_repository().customer_exists(typed)
+
+
+@pytest.mark.parametrize(
+    "typed",
+    ["TR-4524", "tr-4524", "TR 4524", "TR4524", "tr4524", "#TR-4524", "TR-4524.", "TR–4524"],
+)
+def test_an_order_id_resolves_however_it_is_punctuated(typed):
+    from app.services.order_repository import get_order_repository
+
+    assert get_order_repository().get_for_customer(typed, "C-100") is not None
+
+
+def test_normalising_punctuation_cannot_merge_two_identities():
+    """The permissiveness is only safe while distinct ids stay distinct."""
+    from app.services.order_repository import _key
+
+    ids = ["C-100", "C-101", "C-102", "C-103", "TR-4521", "TR-4524", "TR-4530"]
+    assert len({_key(i) for i in ids}) == len(ids)
+
+
+@pytest.mark.parametrize("typed", ["c100", "C 100", "#C-100", "C-100."])
+def test_punctuation_tolerance_never_opens_another_customers_order(typed):
+    from app.services.order_repository import get_order_repository
+
+    # TR-4522 belongs to C-101, never to C-100 in any spelling.
+    assert get_order_repository().get_for_customer("TR-4522", typed) is None
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [("what about TR-4524?", True), ("my order is tr4524", True),
+     ("order TR 4524 please", True), ("and TR-4524.", True),
+     ("I have 4524 items", False), ("call me on 1234", False)],
+)
+def test_an_order_id_is_recognised_in_ordinary_sentences(message, expected):
+    """Bare four-digit numbers must not be mistaken for order ids."""
+    from app.agent.state import ORDER_ID_RE
+
+    assert bool(ORDER_ID_RE.search(message)) is expected

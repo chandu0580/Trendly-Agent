@@ -183,7 +183,7 @@ def sensitive_values(order_id: str) -> list[str]:
     repo = get_order_repository()
     owner = owner_of(order_id)
     order = repo.get_for_customer(order_id, owner)
-    customer = repo._customers[owner]
+    customer = repo.get_customer(owner)
 
     values = [
         customer.name,

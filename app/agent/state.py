@@ -15,7 +15,10 @@ from dataclasses import dataclass, field
 from ..models.conversation import ConversationState, PendingAction
 from ..tools.context import ToolContext
 
-ORDER_ID_RE = re.compile(r"\bTR-\d{4}\b", re.I)
+# Accepts the separators people actually type — "TR-4524", "TR 4524", "TR4524" —
+# and the en/em dash autocorrect substitutes for a hyphen. The repository
+# normalises further, so anything matched here resolves to a real order.
+ORDER_ID_RE = re.compile(r"\bTR[-–— ]?\d{4}\b", re.I)
 
 # Catches a customer *offering* financial credentials as well as pasting them.
 # "Can I give you my bank details here?" carries no digits and none of the

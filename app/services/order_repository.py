@@ -8,6 +8,7 @@ layer rather than something a caller can forget to check.
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 
 from ..config import ORDERS_PATH
@@ -15,14 +16,17 @@ from ..models.order import Customer, Order
 
 
 def _key(value: str | None) -> str:
-    """Normalise an identifier for lookup.
+    """Normalise an identifier down to its letters and digits.
 
-    Customers type `c-100` and ` C-100 ` as readily as `C-100`. Order ids were
-    already uppercased on the way in while customer ids were not, so the same
-    person was recognised or rejected depending on their shift key. Case and
-    surrounding space are not part of an identity.
+    People do not type identifiers the way a database stores them. `c-100`,
+    `C 100`, `C100`, `#C-100` and `C-100.` at the end of a sentence are all the
+    same customer, and an en dash arrives whenever autocorrect touches a hyphen.
+    Reducing to alphanumerics makes every one of those resolve.
+
+    Safe to be this permissive because it cannot merge two real identities:
+    C-100 and C-101 differ in a digit, not in punctuation.
     """
-    return (value or "").strip().upper()
+    return re.sub(r"[^A-Za-z0-9]", "", value or "").upper()
 
 
 class OrderRepository:
@@ -37,6 +41,10 @@ class OrderRepository:
         self._customers: dict[str, Customer] = {
             _key(c["customer_id"]): Customer(**c) for c in raw["customers"]
         }
+
+    def get_customer(self, customer_id: str):
+        """The customer record, or None. Accepts any casing or punctuation."""
+        return self._customers.get(_key(customer_id))
 
     def customer_exists(self, customer_id: str) -> bool:
         return _key(customer_id) in self._customers
